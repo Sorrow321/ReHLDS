@@ -38,7 +38,7 @@
 #include "pr_dlls.h"
 
 #define REHLDS_API_VERSION_MAJOR 3
-#define REHLDS_API_VERSION_MINOR 15
+#define REHLDS_API_VERSION_MINOR 16
 
 //Steam_NotifyClientConnect hook
 typedef IHookChain<qboolean, IGameClient*, const void*, unsigned int> IRehldsHook_Steam_NotifyClientConnect;
@@ -326,6 +326,11 @@ public:
 	virtual IRehldsHookRegistry_SV_SendResources* SV_SendResources() = 0;
 };
 
+// Flags for RehldsFuncs_t::SV_RunEntityMove
+#define ENTMOVE_IGNORE_WALKERS	(1<<0)	// don't collide with other non-player entities that have MOVETYPE_WALK
+#define ENTMOVE_IGNORE_CLIENTS	(1<<1)	// don't collide with players
+#define ENTMOVE_NO_SOUNDS		(1<<2)	// don't play the movement sounds (footsteps, landing etc)
+
 struct RehldsFuncs_t {
 	void(*DropClient)(IGameClient* cl, bool crash, const char* fmt, ...);
 	void(*RejectConnection)(netadr_t *adr, char *fmt, ...);
@@ -437,6 +442,9 @@ struct RehldsFuncs_t {
 
 	// Pause
 	void(*SetServerPause)(bool status);
+
+	// Runs the player movement code (game's PM_Move) for a non-player entity with MOVETYPE_WALK (API 3.16+)
+	bool(*SV_RunEntityMove)(edict_t *ent, const struct usercmd_s *cmd, int flags);
 };
 
 class IRehldsApi {

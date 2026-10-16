@@ -30,11 +30,27 @@
 
 void EXT_FUNC PM_SV_PlaybackEventFull(int flags, int clientindex, unsigned short eventindex, float delay, float *origin, float *angles, float fparam1, float fparam2, int iparam1, int iparam2, int bparam1, int bparam2)
 {
+	// moving a non-player entity (SV_RunEntityMove), clientindex isn't a client
+	if (g_pmEntity)
+	{
+		EV_Playback(flags, g_pmEntity, eventindex, delay, origin, angles, fparam1, fparam2, iparam1, iparam2, bparam1, bparam2);
+		return;
+	}
+
 	EV_SV_Playback(flags | FEV_NOTHOST, clientindex, eventindex, delay, origin, angles, fparam1, fparam2, iparam1, iparam2, bparam1, bparam2);
 }
 
 void EXT_FUNC PM_SV_PlaySound(int channel, const char  *sample, float volume, float attenuation, int fFlags, int pitch)
 {
+	// moving a non-player entity (SV_RunEntityMove): no client predicts its sounds, so everyone gets them
+	if (g_pmEntity)
+	{
+		if (!(g_pmEntityFlags & ENTMOVE_NO_SOUNDS))
+			SV_StartSound(0, g_pmEntity, channel, sample, (int)(volume * 255.0), attenuation, fFlags, pitch);
+
+		return;
+	}
+
 	SV_StartSound(1, host_client->edict, channel, sample, (int)(volume * 255.0), attenuation, fFlags, pitch);
 }
 

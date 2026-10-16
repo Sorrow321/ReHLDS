@@ -38,6 +38,13 @@ float s_LastFullUpdate[33];
 
 edict_t *sv_player;
 
+// Non-player entity moved by SV_RunEntityMove (NULL while clients are moved) and its flags
+edict_t *g_pmEntity;
+int g_pmEntityFlags;
+
+// Above zero while the shared player move state (pmove) is in use
+int g_pmBusy;
+
 //int giSkip;
 qboolean nofind;
 
@@ -554,8 +561,8 @@ void SV_AddLinksToPM_(areanode_t *node, float *pmove_mins, float *pmove_maxs)
 		if (check->v.solid != SOLID_BSP && check->v.solid != SOLID_BBOX && check->v.solid != SOLID_SLIDEBOX && check->v.solid != SOLID_NOT)
 			continue;
 
-		// Apply our own custom checks
-		if (!SV_AllowPhysent(check, sv_player)) {
+		// Apply our own custom checks (not for SV_RunEntityMove: hook handlers expect sv_player to be a client)
+		if (!g_pmEntity && !SV_AllowPhysent(check, sv_player)) {
 			continue;
 		}
 
@@ -572,6 +579,15 @@ void SV_AddLinksToPM_(areanode_t *node, float *pmove_mins, float *pmove_maxs)
 
 		if (check == sv_player)
 			continue;
+
+		if (g_pmEntity)
+		{
+			if ((g_pmEntityFlags & ENTMOVE_IGNORE_CLIENTS) && e >= 1 && e <= g_psvs.maxclients)
+				continue;
+
+			if ((g_pmEntityFlags & ENTMOVE_IGNORE_WALKERS) && e > g_psvs.maxclients && check->v.movetype == MOVETYPE_WALK)
+				continue;
+		}
 
 		if ((check->v.flags & FL_CLIENT) && check->v.health <= 0.0)
 			continue;
@@ -862,6 +878,9 @@ void SV_RunCmd(usercmd_t* ucmd, int random_seed, qboolean fNetCmd, qboolean fCho
 		sv_player->v.clbasevelocity[2] = sv_player->v.basevelocity[2];
 	}
 
+	// pmove is in use until the touches are dispatched, SV_RunEntityMove must not overwrite it from game callbacks
+	g_pmBusy++;
+
 	pmove->server = TRUE;
 	pmove->multiplayer = (g_psvs.maxclients > 1) ? TRUE : FALSE;
 	pmove->time = float(1000.0 * host_client->svtimebase);
@@ -1079,6 +1098,8 @@ void SV_RunCmd(usercmd_t* ucmd, int random_seed, qboolean fNetCmd, qboolean fCho
 		sv_player->v.velocity[2] = vel[2];
 	}
 
+	g_pmBusy--;
+
 	gGlobalVariables.time = (float)host_client->svtimebase;
 	gGlobalVariables.frametime = frametime;
 	gEntityInterface.pfnPlayerPostThink(sv_player);
@@ -1086,6 +1107,244 @@ void SV_RunCmd(usercmd_t* ucmd, int random_seed, qboolean fNetCmd, qboolean fCho
 
 	if (!host_client->fakeclient)
 		SV_RestoreMove(host_client);
+}
+
+// Moves a non-player entity the way SV_RunCmd moves a client: runs the game's PM_Move on its entvars.
+// Player think functions (CmdStart, PlayerPreThink, PlayerPostThink, CmdEnd) aren't called.
+static void SV_RunEntityMove_internal(edict_t *ent, const usercmd_t *ucmd, int flags)
+{
+	pmtrace_t touches[MAX_PHYSENTS];
+	edict_t *touchents[MAX_PHYSENTS];
+	trace_t trace;
+	vec3_t oldangles;
+	vec3_t vel;
+	int i;
+	int numtouch;
+
+	float frametime = float(ucmd->msec * 0.001);
+	float oldtime = gGlobalVariables.time;
+	edict_t *oldplayer = sv_player;
+	playermove_t *oldpmove = pmove;
+
+	g_pmBusy++;
+
+	// a client command can be in progress (game's PlayerPreThink or Think), keep its data
+	VectorCopy(g_svmove.oldangles, oldangles);
+
+	pmove = &g_svmove;
+	sv_player = ent; // SV_AddLinksToPM skips sv_player and the entities it owns
+	g_pmEntity = ent;
+	g_pmEntityFlags = flags;
+
+	if (ucmd->impulse)
+		ent->v.impulse = ucmd->impulse;
+
+	ent->v.button = ucmd->buttons;
+	SV_CheckMovingGround(ent, frametime);
+
+	VectorCopy(ent->v.v_angle, pmove->oldangles);
+	VectorCopy(ucmd->viewangles, ent->v.v_angle);
+
+	pmove->server = TRUE;
+	pmove->multiplayer = (g_psvs.maxclients > 1) ? TRUE : FALSE;
+	pmove->time = float(1000.0 * g_psv.time);
+	pmove->usehull = (ent->v.flags & FL_DUCKING) == FL_DUCKING;
+	pmove->maxspeed = sv_maxspeed.value;
+	pmove->clientmaxspeed = ent->v.maxspeed;
+	pmove->flDuckTime = (float)ent->v.flDuckTime;
+	pmove->bInDuck = ent->v.bInDuck;
+	pmove->flTimeStepSound = ent->v.flTimeStepSound;
+	pmove->iStepLeft = ent->v.iStepLeft;
+	pmove->flFallVelocity = ent->v.flFallVelocity;
+	pmove->flSwimTime = (float)ent->v.flSwimTime;
+	pmove->oldbuttons = ent->v.oldbuttons;
+	pmove->physinfo[0] = '\0';
+
+	VectorCopy(ent->v.velocity, pmove->velocity);
+	VectorCopy(ent->v.movedir, pmove->movedir);
+	VectorCopy(ent->v.v_angle, pmove->angles);
+	VectorCopy(ent->v.basevelocity, pmove->basevelocity);
+	VectorCopy(ent->v.view_ofs, pmove->view_ofs);
+	VectorCopy(ent->v.punchangle, pmove->punchangle);
+
+	pmove->deadflag = ent->v.deadflag;
+	pmove->effects = ent->v.effects;
+	pmove->gravity = ent->v.gravity;
+	pmove->friction = ent->v.friction;
+	pmove->spectator = 0;
+	pmove->waterjumptime = ent->v.teleport_time;
+
+	Q_memcpy(&pmove->cmd, ucmd, sizeof(pmove->cmd));
+
+	pmove->dead = ent->v.health <= 0.0;
+	pmove->movetype = ent->v.movetype;
+	pmove->flags = ent->v.flags;
+	pmove->player_index = NUM_FOR_EDICT(ent) - 1;
+
+	pmove->iuser1 = ent->v.iuser1;
+	pmove->iuser2 = ent->v.iuser2;
+	pmove->iuser3 = ent->v.iuser3;
+	pmove->iuser4 = ent->v.iuser4;
+	pmove->fuser1 = ent->v.fuser1;
+	pmove->fuser2 = ent->v.fuser2;
+	pmove->fuser3 = ent->v.fuser3;
+	pmove->fuser4 = ent->v.fuser4;
+
+	VectorCopy(ent->v.vuser1, pmove->vuser1);
+	VectorCopy(ent->v.vuser2, pmove->vuser2);
+	VectorCopy(ent->v.vuser3, pmove->vuser3);
+	VectorCopy(ent->v.vuser4, pmove->vuser4);
+
+	VectorCopy(ent->v.origin, pmove->origin);
+
+	SV_AddLinksToPM(sv_areanodes, pmove->origin);
+
+	pmove->frametime = frametime;
+	pmove->runfuncs = TRUE;
+	pmove->PM_PlaySound = PM_SV_PlaySound;
+	pmove->PM_TraceTexture = PM_SV_TraceTexture;
+	pmove->PM_PlaybackEventFull = PM_SV_PlaybackEventFull;
+	pmove->movevars = &sv_movevars;
+
+	gEntityInterface.pfnPM_Move(pmove, TRUE);
+
+	ent->v.deadflag = pmove->deadflag;
+	ent->v.effects = pmove->effects;
+	ent->v.teleport_time = pmove->waterjumptime;
+	ent->v.waterlevel = pmove->waterlevel;
+	ent->v.watertype = pmove->watertype;
+	ent->v.flags = pmove->flags;
+	ent->v.friction = pmove->friction;
+	// movetype stays MOVETYPE_WALK: PM_Move switches to MOVETYPE_FLY on ladders, but it detects them
+	// again on every move, while SV_Physics would move a MOVETYPE_FLY entity on its own
+	ent->v.maxspeed = pmove->clientmaxspeed;
+	ent->v.iStepLeft = pmove->iStepLeft;
+
+	VectorCopy(pmove->view_ofs, ent->v.view_ofs);
+	VectorCopy(pmove->movedir, ent->v.movedir);
+	VectorCopy(pmove->punchangle, ent->v.punchangle);
+
+	if (pmove->onground == -1)
+	{
+		ent->v.flags &= ~FL_ONGROUND;
+	}
+	else
+	{
+		ent->v.flags |= FL_ONGROUND;
+		ent->v.groundentity = EDICT_NUM(pmove->physents[pmove->onground].info);
+	}
+
+	VectorCopy(pmove->origin, ent->v.origin);
+	VectorCopy(pmove->velocity, ent->v.velocity);
+	VectorCopy(pmove->basevelocity, ent->v.basevelocity);
+
+	VectorCopy(pmove->angles, ent->v.v_angle);
+	ent->v.angles[0] = float(-pmove->angles[0] / 3.0);
+	ent->v.angles[1] = pmove->angles[1];
+	ent->v.angles[2] = pmove->angles[2];
+
+	ent->v.bInDuck = pmove->bInDuck;
+	ent->v.flDuckTime = (int)pmove->flDuckTime;
+	ent->v.flTimeStepSound = pmove->flTimeStepSound;
+	ent->v.flFallVelocity = pmove->flFallVelocity;
+	ent->v.flSwimTime = (int)pmove->flSwimTime;
+	ent->v.oldbuttons = pmove->cmd.buttons;
+
+	ent->v.iuser1 = pmove->iuser1;
+	ent->v.iuser2 = pmove->iuser2;
+	ent->v.iuser3 = pmove->iuser3;
+	ent->v.iuser4 = pmove->iuser4;
+	ent->v.fuser1 = pmove->fuser1;
+	ent->v.fuser2 = pmove->fuser2;
+	ent->v.fuser3 = pmove->fuser3;
+	ent->v.fuser4 = pmove->fuser4;
+
+	VectorCopy(pmove->vuser1, ent->v.vuser1);
+	VectorCopy(pmove->vuser2, ent->v.vuser2);
+	VectorCopy(pmove->vuser3, ent->v.vuser3);
+	VectorCopy(pmove->vuser4, ent->v.vuser4);
+
+	SetMinMaxSize(ent, player_mins[pmove->usehull], player_maxs[pmove->usehull], 0);
+
+	// the game code below can start another move, so take the touches out of pmove before releasing it
+	numtouch = (pmove->numtouch < MAX_PHYSENTS) ? pmove->numtouch : MAX_PHYSENTS;
+	for (i = 0; i < numtouch; i++)
+	{
+		touches[i] = pmove->touchindex[i];
+		touchents[i] = EDICT_NUM(pmove->physents[touches[i].ent].info);
+	}
+
+	VectorCopy(oldangles, g_svmove.oldangles);
+	pmove = oldpmove;
+	sv_player = oldplayer;
+	g_pmEntity = NULL;
+	g_pmEntityFlags = 0;
+	g_pmBusy--;
+
+	if (ent->v.solid)
+	{
+		SV_LinkEdict(ent, TRUE);
+
+		VectorCopy(ent->v.velocity, vel);
+		for (i = 0; i < numtouch && !ent->free; i++)
+		{
+			if (touchents[i]->free)
+				continue;
+
+			SV_ConvertPMTrace(&trace, &touches[i], touchents[i]);
+			VectorCopy(touches[i].deltavelocity, ent->v.velocity);
+			SV_Impact(touchents[i], ent, &trace);
+		}
+
+		if (!ent->free)
+			VectorCopy(vel, ent->v.velocity);
+	}
+	else
+	{
+		// not solid, but its leafs are still needed to send it to clients
+		SV_LinkEdict(ent, FALSE);
+	}
+
+	gGlobalVariables.time = oldtime;
+}
+
+// Runs the player movement code for a non-player entity with MOVETYPE_WALK (exposed in ReHLDS API).
+// Returns false if the entity can't be moved.
+bool EXT_FUNC SV_RunEntityMove(edict_t *ent, const usercmd_t *ucmd, int flags)
+{
+	if (!ent || ent->free || !ucmd)
+		return false;
+
+	// clients are moved by their commands (SV_RunCmd)
+	if (NUM_FOR_EDICT(ent) <= g_psvs.maxclients)
+		return false;
+
+	// SV_Physics only runs think for these entities, so nothing else moves them
+	if (ent->v.movetype != MOVETYPE_WALK)
+		return false;
+
+	// called from a game callback (touch, sound etc) of another move that still uses pmove
+	if (g_pmBusy > 0)
+	{
+		Con_DPrintf("%s: called during another player move, ignored\n", __func__);
+		return false;
+	}
+
+	if (ucmd->msec > 50)
+	{
+		// split long commands like SV_RunCmd does
+		usercmd_t cmd = *ucmd;
+		cmd.msec = ucmd->msec / 2;
+		if (!SV_RunEntityMove(ent, &cmd, flags))
+			return false;
+
+		cmd.msec = ucmd->msec - cmd.msec;
+		cmd.impulse = 0;
+		return SV_RunEntityMove(ent, &cmd, flags);
+	}
+
+	SV_RunEntityMove_internal(ent, ucmd, flags);
+	return true;
 }
 
 int SV_ValidateClientCommand(char *pszCommand)
@@ -1178,6 +1437,10 @@ int SV_UnlagCheckTeleport(vec_t *v1, vec_t *v2)
 
 void SV_GetTrueOrigin(int player, vec_t *origin)
 {
+	// players are only moved back in time for a client's own command
+	if (g_pmEntity)
+		return;
+
 	if (!host_client->lw || !host_client->lc)
 		return;
 
@@ -1197,6 +1460,10 @@ void SV_GetTrueOrigin(int player, vec_t *origin)
 
 void SV_GetTrueMinMax(int player, float **fmin, float **fmax)
 {
+	// players are only moved back in time for a client's own command
+	if (g_pmEntity)
+		return;
+
 	if (!host_client->lw || !host_client->lc)
 		return;
 

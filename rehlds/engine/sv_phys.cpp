@@ -1491,11 +1491,17 @@ void SV_Physics()
 		if (i > 0 && i <= g_psvs.maxclients)
 			continue;
 
-		SV_CheckMovingGround(ent, host_frametime);
+		// non-player entities with MOVETYPE_WALK are moved by SV_RunEntityMove, like clients by their commands
+		if (ent->v.movetype != MOVETYPE_WALK)
+			SV_CheckMovingGround(ent, host_frametime);
 
 		switch (ent->v.movetype)
 		{
 		case MOVETYPE_NONE:
+			SV_Physics_None(ent);
+			break;
+		case MOVETYPE_WALK:
+			// they only think here (the original engine stops with "bad movetype")
 			SV_Physics_None(ent);
 			break;
 		case MOVETYPE_PUSH:

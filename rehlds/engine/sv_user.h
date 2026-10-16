@@ -57,6 +57,9 @@ typedef struct clc_func_s
 } clc_func_t;
 
 extern edict_t *sv_player;
+extern edict_t *g_pmEntity;
+extern int g_pmEntityFlags;
+extern int g_pmBusy;
 extern sv_adjusted_positions_t truepositions[MAX_CLIENTS];
 extern qboolean g_balreadymoved;
 
@@ -91,6 +94,7 @@ void SV_CheckMovingGround(edict_t *player, float frametime);
 void SV_ConvertPMTrace(trace_t *dest, pmtrace_t *src, edict_t *ent);
 void SV_ForceFullClientsUpdate(void);
 void SV_RunCmd(usercmd_t* ucmd, int random_seed, qboolean fNetCmd = FALSE, qboolean fChopped = FALSE);
+bool SV_RunEntityMove(edict_t *ent, const usercmd_t *ucmd, int flags);
 int SV_ValidateClientCommand(char *pszCommand);
 float SV_CalcClientTime(client_t *cl);
 void SV_ComputeLatency(client_t *cl);

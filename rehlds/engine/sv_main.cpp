@@ -8308,6 +8308,10 @@ void EXT_FUNC SV_Frame_Internal()
 	if (!g_psv.active)
 		return;
 
+	// no player move is running between frames (Host_Error jumps out of one without cleanup)
+	g_pmBusy = 0;
+	g_pmEntity = NULL;
+
 	gGlobalVariables.frametime = host_frametime;
 	g_psv.oldtime = g_psv.time;
 	SV_CheckCmdTimes();
